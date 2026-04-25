@@ -1,0 +1,78 @@
+# ============================================================
+# LIS Daemon — ASTM Configuration
+# ============================================================
+# This file defines how the daemon parses ASTM E1394 messages
+# and which ports to listen on. Adjust field positions if the
+# Mindray firmware uses non-standard ASTM field ordering.
+# ============================================================
+
+daemon:
+  # How often to reload machine config from Odoo (seconds)
+  machine_refresh_interval: 300
+
+  # TCP connection settings
+  tcp:
+    # Max time to wait for a complete ASTM frame (seconds)
+    receive_timeout: 30
+    # Buffer size for TCP reads (bytes)
+    buffer_size: 4096
+
+  # Retry settings for Odoo JSON-RPC calls
+  odoo_rpc:
+    max_retries: 3
+    retry_delay: 2  # seconds between retries
+    timeout: 30     # HTTP request timeout (seconds)
+
+# ============================================================
+# ASTM E1394 Field Positions
+# ============================================================
+# ASTM records use pipe '|' as field delimiter.
+# Fields are 1-indexed as per the ASTM standard.
+# Adjust these ONLY if the Mindray firmware deviates from
+# standard field positions.
+# ============================================================
+
+astm:
+  # Field delimiter
+  field_delimiter: "|"
+
+  # Component delimiter (within fields)
+  component_delimiter: "^"
+
+  # Repeat delimiter (for multiple test codes in O record)
+  repeat_delimiter: "\\"
+
+  # Record type indicators (first character after frame number)
+  record_types:
+    header: "H"
+    patient: "P"
+    order: "O"
+    result: "R"
+    terminator: "L"
+
+  # O (Order) record field positions
+  order_record:
+    # Field containing sample ID (LS###)
+    sample_id_field: 3      # O|1|LS130|...  → field 3
+    # Field containing test codes
+    test_codes_field: 5     # O|1|LS130||^^^GLU\^^^CREA → field 5
+
+  # R (Result) record field positions
+  result_record:
+    # Field containing the test code
+    test_code_field: 3      # R|1|^^^GLU → field 3 (code after ^^^)
+    # Field containing the result value
+    value_field: 4          # R|1|^^^GLU|5.2 → field 4
+    # Field containing the unit
+    unit_field: 5           # R|1|^^^GLU|5.2|mmol/L → field 5
+    # Field containing the reference range
+    ref_range_field: 6      # → field 6
+    # Field containing abnormal flags
+    flags_field: 7          # N/H/L/A → field 7
+
+  # P (Patient) record field positions (for logging only)
+  patient_record:
+    patient_id_field: 4     # P|1||HMS00621 → field 4
+    name_field: 5
+    dob_field: 7
+    sex_field: 8
