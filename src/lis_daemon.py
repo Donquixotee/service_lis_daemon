@@ -1,91 +1,93 @@
 # -*- coding: utf-8 -*-
-"""LIS Daemon — Async TCP server for receiving ASTM results.
+"""LIS Daemon — HL7/MLLP async TCP server.
 
-Listens on one port per configured machine. When a Mindray machine
-connects and sends an ASTM message:
-1. Receive full frame (ENQ → STX…ETX → EOT)
-2. ACK each frame
-3. Parse with ASTMParser
-4. Call Odoo action_receive_result() via OdooClient for each R record
+Single TCP listener on port 5001. Both machines connect to this port.
+Machine identification is by source IP (matched against dnd.lis.machine.ip_address).
+If IP is not yet configured, falls back to MSH-3 (Sending Application) name matching.
+
+Flow per connection:
+    1. Accept TCP connection, note source IP
+    2. Identify machine record from Odoo by IP
+    3. Read MLLP frames: 0x0B ... 0x1C 0x0D
+    4. Parse HL7 ORU^R01 message with HL7Parser
+    5. Send MLLP ACK back to machine
+    6. Call Odoo action_receive_result() for each OBX result
+    7. Update machine online/offline status
 """
 
 import asyncio
 import logging
 from datetime import datetime, timezone
 
-from .astm_parser import ASTMParser, ENQ, STX, ETX, ETB, EOT, ACK, NAK, CR, LF
+from .hl7_parser import HL7Parser, MLLP_START, MLLP_END
 
 logger = logging.getLogger(__name__)
 
 
 class LisDaemon:
-    """Async TCP server that receives ASTM results from lab machines."""
+    """Async TCP server that receives HL7 results from lab machines."""
 
     def __init__(self, odoo_client, parser, config):
-        """
-        Args:
-            odoo_client: OdooClient instance
-            parser: ASTMParser instance
-            config: dict from daemon.yml 'daemon' section
-        """
         self.odoo_client = odoo_client
         self.parser = parser
         self.config = config
-        self.machines = {}  # port → machine dict
-        self.servers = []   # asyncio.Server instances
+        self.machines = []      # flat list of machine dicts from Odoo
+        self.servers = []       # asyncio.Server instances
         self._running = False
 
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
     async def start(self):
-        """Load machines from Odoo and start TCP listeners."""
-        logger.info("Starting LIS daemon...")
+        """Authenticate with Odoo, load machines, start TCP listener."""
+        logger.info("Starting LIS daemon (HL7/MLLP)...")
 
-        # Authenticate with Odoo
         self.odoo_client.authenticate()
-
-        # Load machine config
         await self._load_machines()
 
-        if not self.machines:
-            logger.warning("No active machines found in Odoo — daemon has nothing to listen on")
-            return
-
-        # Start one TCP server per machine port
-        for port, machine in self.machines.items():
-            server = await asyncio.start_server(
-                lambda r, w, m=machine: self._handle_connection(r, w, m),
-                "0.0.0.0",
-                port,
-            )
-            self.servers.append(server)
-            logger.info(
-                "Listening on port %d for machine '%s' (%s)",
-                port, machine["name"], machine["machine_type"],
-            )
-
+        port = self.config.get("listen_port", 5001)
+        server = await asyncio.start_server(
+            self._handle_connection,
+            "0.0.0.0",
+            port,
+        )
+        self.servers.append(server)
         self._running = True
-        logger.info("LIS daemon started — listening on %d ports", len(self.servers))
 
-        # Start background task to periodically refresh machine config
+        logger.info(
+            "Listening on 0.0.0.0:%d — %d machine(s) configured",
+            port, len(self.machines),
+        )
         asyncio.create_task(self._refresh_loop())
 
+    async def stop(self):
+        """Stop all TCP servers gracefully."""
+        self._running = False
+        for server in self.servers:
+            server.close()
+            await server.wait_closed()
+        logger.info("LIS daemon stopped")
+
+    # ------------------------------------------------------------------
+    # Machine config
+    # ------------------------------------------------------------------
+
     async def _load_machines(self):
-        """Load active machines from Odoo."""
+        """Reload active machine list from Odoo."""
         try:
-            machine_list = self.odoo_client.load_machines()
-            self.machines = {}
-            for m in machine_list:
-                port = m.get("port_receive")
-                if port:
-                    self.machines[port] = m
-                    logger.info(
-                        "  Machine: %s (id=%s, type=%s, port=%d)",
-                        m["name"], m["id"], m["machine_type"], port,
-                    )
+            self.machines = self.odoo_client.load_machines()
+            for m in self.machines:
+                logger.info(
+                    "  Machine: %s  id=%s  type=%s  ip=%s",
+                    m["name"], m["id"], m["machine_type"],
+                    m.get("ip_address") or "not set",
+                )
         except Exception as e:
             logger.error("Failed to load machines from Odoo: %s", e)
 
     async def _refresh_loop(self):
-        """Periodically reload machine config from Odoo."""
+        """Periodically refresh machine config from Odoo."""
         interval = self.config.get("machine_refresh_interval", 300)
         while self._running:
             await asyncio.sleep(interval)
@@ -94,179 +96,212 @@ class LisDaemon:
             except Exception as e:
                 logger.error("Machine refresh failed: %s", e)
 
-    async def _handle_connection(self, reader, writer, machine):
-        """Handle a single TCP connection from a machine.
+    def _find_machine(self, client_ip, sending_app=""):
+        """Find machine record by source IP, with fallback to MSH-3 name."""
+        # Primary: exact IP match
+        for m in self.machines:
+            if m.get("ip_address") and m["ip_address"].strip() == client_ip:
+                return m
+        # Fallback: Sending Application (MSH-3) substring match against machine name
+        if sending_app:
+            sa_lower = sending_app.lower()
+            for m in self.machines:
+                if sa_lower in m.get("name", "").lower() or m.get("name", "").lower() in sa_lower:
+                    logger.info(
+                        "Machine identified by MSH-3 '%s' → '%s' (IP not configured)",
+                        sending_app, m["name"],
+                    )
+                    return m
+        return None
 
-        Implements ASTM E1394 receive protocol:
-        - Wait for ENQ → send ACK
-        - Receive STX frames → send ACK for each
-        - On EOT → parse complete message → process results
-        """
+    # ------------------------------------------------------------------
+    # Connection handler
+    # ------------------------------------------------------------------
+
+    async def _handle_connection(self, reader, writer):
+        """Handle one TCP connection — read MLLP frames until disconnect."""
         addr = writer.get_extra_info("peername")
-        machine_id = machine["id"]
-        machine_name = machine["name"]
-        logger.info("Connection from %s for machine '%s'", addr, machine_name)
+        client_ip = addr[0] if addr else "unknown"
+        logger.info("New connection from %s", client_ip)
 
-        # Update machine status to online
-        try:
-            now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-            self.odoo_client.set_machine_status(machine_id, "online", last_seen=now)
-        except Exception as e:
-            logger.warning("Failed to update machine status: %s", e)
+        timeout  = self.config.get("tcp", {}).get("receive_timeout", 60)
+        buf_size = self.config.get("tcp", {}).get("buffer_size", 65536)
 
-        buffer = bytearray()
-        timeout = self.config.get("tcp", {}).get("receive_timeout", 30)
-        buf_size = self.config.get("tcp", {}).get("buffer_size", 4096)
+        # Machine is identified after the first message (need MSH-3 for fallback)
+        machine = self._find_machine(client_ip)
+        if machine:
+            self._mark_online(machine)
+
+        buffer     = bytearray()
+        in_message = False
 
         try:
             while True:
                 try:
                     data = await asyncio.wait_for(reader.read(buf_size), timeout=timeout)
                 except asyncio.TimeoutError:
-                    logger.warning("Timeout receiving from %s — closing connection", addr)
+                    logger.warning("Timeout on connection from %s — closing", client_ip)
                     break
 
                 if not data:
-                    logger.info("Connection closed by %s", addr)
+                    logger.info("Connection closed by %s", client_ip)
                     break
 
-                # Process byte by byte for ASTM protocol
+                # Log raw bytes on first receive to diagnose protocol
+                if not buffer and not in_message:
+                    logger.warning(
+                        "RAW first %d bytes from %s: hex=%s repr=%r",
+                        len(data), client_ip,
+                        data[:64].hex(), data[:64],
+                    )
+
                 for byte in data:
                     b = bytes([byte])
 
-                    if b == ENQ:
-                        # Machine wants to send — ACK it
-                        writer.write(ACK)
-                        await writer.drain()
-                        logger.debug("ENQ received from %s — sent ACK", addr)
-                        buffer = bytearray()  # reset buffer
-
-                    elif b == EOT:
-                        # End of transmission — process the buffer
-                        logger.debug("EOT received from %s — processing %d bytes", addr, len(buffer))
-                        if buffer:
-                            await self._process_message(bytes(buffer), machine)
+                    if b == MLLP_START:
                         buffer = bytearray()
+                        in_message = True
 
-                    elif b == STX:
-                        # Start of frame — begin collecting
+                    elif in_message:
                         buffer.append(byte)
 
-                    elif b in (ETX, ETB):
-                        # End of frame — ACK it
-                        buffer.append(byte)
-                        # Read checksum (2 bytes) + CR + LF
-                        try:
-                            trailing = await asyncio.wait_for(reader.read(4), timeout=5)
-                            buffer.extend(trailing)
-                        except asyncio.TimeoutError:
-                            pass
-                        writer.write(ACK)
-                        await writer.drain()
-                        logger.debug("Frame received (%d bytes) — sent ACK", len(buffer))
+                        # MLLP end is last two bytes: 0x1C 0x0D
+                        if len(buffer) >= 2 and buffer[-2:] == MLLP_END:
+                            raw_text = buffer[:-2].decode("utf-8", errors="replace")
 
-                    else:
-                        buffer.append(byte)
+                            # Re-try machine lookup using MSH-3 now that we have message
+                            if machine is None:
+                                parsed_for_id = self.parser.parse_message(raw_text)
+                                machine = self._find_machine(client_ip, parsed_for_id.get("sending_app", ""))
+                                if machine:
+                                    self._mark_online(machine)
+                                else:
+                                    logger.warning(
+                                        "Unknown machine from %s (MSH-3=%s) — processing anyway",
+                                        client_ip, parsed_for_id.get("sending_app"),
+                                    )
+
+                            # ACK immediately before processing (machine may time out waiting)
+                            ack_msg = self._build_ack(raw_text)
+                            writer.write(MLLP_START + ack_msg.encode("utf-8") + MLLP_END)
+                            await writer.drain()
+
+                            await self._process_message(raw_text, machine, client_ip)
+
+                            buffer = bytearray()
+                            in_message = False
 
         except Exception as e:
-            logger.error("Error handling connection from %s: %s", addr, e, exc_info=True)
+            logger.error("Error on connection from %s: %s", client_ip, e, exc_info=True)
         finally:
             writer.close()
             try:
                 await writer.wait_closed()
             except Exception:
                 pass
-            logger.info("Connection closed: %s", addr)
-            # Mark machine offline on disconnect
-            try:
-                self.odoo_client.set_machine_status(machine_id, "offline")
-            except Exception as e:
-                logger.warning("Failed to update machine offline status: %s", e)
+            logger.info("Disconnected: %s", client_ip)
+            if machine:
+                self._mark_offline(machine)
 
+    # ------------------------------------------------------------------
+    # HL7 ACK builder
+    # ------------------------------------------------------------------
 
-    async def _process_message(self, raw_bytes, machine):
-        """Parse ASTM message and send results to Odoo.
+    def _build_ack(self, raw_text):
+        """Build a minimal HL7 AA (Application Accept) ACK."""
+        msg_id    = "UNKNOWN"
+        sender    = ""
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
 
-        Args:
-            raw_bytes: bytes - complete ASTM transmission
-            machine: dict - machine record from Odoo
-        """
-        machine_id = machine["id"]
-        machine_name = machine["name"]
+        for line in raw_text.replace("\n", "\r").split("\r"):
+            if line.startswith("MSH"):
+                fields = line.split("|")
+                sender = fields[2] if len(fields) > 2 else ""
+                msg_id = fields[9] if len(fields) > 9 else "UNKNOWN"
+                break
+
+        return (
+            f"MSH|^~\\&|LIS||{sender}||{timestamp}||ACK^R01|ACK{msg_id}|P|2.3\r"
+            f"MSA|AA|{msg_id}\r"
+        )
+
+    # ------------------------------------------------------------------
+    # Message processing
+    # ------------------------------------------------------------------
+
+    async def _process_message(self, raw_text, machine, client_ip):
+        """Parse HL7 message and send each OBX result to Odoo."""
+        machine_id   = machine["id"]   if machine else None
+        machine_name = machine["name"] if machine else f"unknown@{client_ip}"
 
         try:
-            parsed = self.parser.parse_message(raw_bytes)
+            parsed = self.parser.parse_message(raw_text)
         except Exception as e:
-            logger.error("ASTM parse error for machine '%s': %s", machine_name, e, exc_info=True)
-            # Still try to log the raw message
-            try:
-                self.odoo_client.send_result(
-                    machine_id=machine_id,
-                    sample_barcode="",
-                    test_code="",
-                    value="",
-                    raw_message=raw_bytes.decode("ascii", errors="replace"),
-                )
-            except Exception:
-                pass
+            logger.error("HL7 parse error (machine=%s): %s", machine_name, e, exc_info=True)
             return
 
-        # Get sample barcode from first O record
-        sample_barcode = ""
-        if parsed["orders"]:
-            sample_barcode = parsed["orders"][0].get("sample_id", "")
+        sample_barcode = parsed.get("sample_barcode", "")
 
-        raw_text = parsed.get("raw", raw_bytes.decode("ascii", errors="replace"))
-
-        # Process each R (Result) record
         if not parsed["results"]:
             logger.warning(
-                "No R records found in message from machine '%s' (sample=%s)",
+                "No OBX results in message from %s (barcode=%s)",
                 machine_name, sample_barcode,
             )
             return
 
         for result in parsed["results"]:
-            test_code = result.get("test_code", "")
-            value = result.get("value", "")
-            unit = result.get("unit", "")
-            flags = result.get("flags", "")
-            ref_range = result.get("ref_range", "")
+            # Each OBX may carry its own barcode if multiple OBR blocks
+            barcode    = result.get("sample_barcode") or sample_barcode
+            test_code  = result.get("test_code", "")
+            value      = result.get("value", "")
+            unit       = result.get("unit", "")
+            flags      = result.get("flags", "")
+            ref_range  = result.get("ref_range", "")
 
             logger.info(
-                "Result: %s/%s = %s %s [%s] (machine=%s)",
-                sample_barcode, test_code, value, unit, flags, machine_name,
+                "Result  machine=%-15s  barcode=%-8s  code=%-6s  value=%s %s  flags=%s",
+                machine_name, barcode, test_code, value, unit, flags or "N",
             )
+
+            if not machine_id:
+                logger.warning("Cannot send to Odoo — machine not identified yet")
+                continue
 
             try:
                 response = self.odoo_client.send_result(
-                    machine_id=machine_id,
-                    sample_barcode=sample_barcode,
-                    test_code=test_code,
-                    value=value,
-                    unit=unit or None,
-                    flags=flags or None,
-                    ref_range=ref_range or None,
-                    raw_message=raw_text,
+                    machine_id     = machine_id,
+                    sample_barcode = barcode,
+                    test_code      = test_code,
+                    value          = value,
+                    unit           = unit       or None,
+                    flags          = flags      or None,
+                    ref_range      = ref_range  or None,
+                    raw_message    = raw_text,
                 )
                 logger.info(
-                    "Odoo response for %s/%s: status=%s, log_id=%s",
-                    sample_barcode,
-                    test_code,
-                    response.get("status"),
-                    response.get("log_id"),
+                    "Odoo  barcode=%s  code=%s  status=%s  log_id=%s",
+                    barcode, test_code,
+                    response.get("status"), response.get("log_id"),
                 )
             except Exception as e:
                 logger.error(
-                    "Failed to send result to Odoo (%s/%s): %s",
-                    sample_barcode, test_code, e,
-                    exc_info=True,
+                    "Failed to send result to Odoo (barcode=%s code=%s): %s",
+                    barcode, test_code, e, exc_info=True,
                 )
 
-    async def stop(self):
-        """Stop all TCP servers."""
-        self._running = False
-        for server in self.servers:
-            server.close()
-            await server.wait_closed()
-        logger.info("LIS daemon stopped")
+    # ------------------------------------------------------------------
+    # Status helpers
+    # ------------------------------------------------------------------
+
+    def _mark_online(self, machine):
+        try:
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            self.odoo_client.set_machine_status(machine["id"], "online", last_seen=now)
+        except Exception as e:
+            logger.warning("Could not mark machine online: %s", e)
+
+    def _mark_offline(self, machine):
+        try:
+            self.odoo_client.set_machine_status(machine["id"], "offline")
+        except Exception as e:
+            logger.warning("Could not mark machine offline: %s", e)
