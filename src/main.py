@@ -15,7 +15,7 @@ import sys
 import yaml
 
 from .odoo_client import OdooClient
-from .astm_parser import ASTMParser
+from .hl7_parser import HL7Parser
 from .lis_daemon import LisDaemon
 
 logger = logging.getLogger("lis_daemon")
@@ -74,7 +74,7 @@ def main():
     # --- Load config ---
     config = load_config(config_path)
     daemon_config = config.get("daemon", {})
-    astm_config = config.get("astm", {})
+    hl7_config = config.get("hl7", {})
 
     # --- Initialize components ---
     rpc_config = daemon_config.get("odoo_rpc", {})
@@ -89,7 +89,7 @@ def main():
         timeout=rpc_config.get("timeout", 30),
     )
 
-    parser = ASTMParser(astm_config)
+    parser = HL7Parser(hl7_config)
     daemon = LisDaemon(odoo_client, parser, daemon_config)
 
     # --- Run async event loop ---

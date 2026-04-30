@@ -1,5 +1,2 @@
-# LIS Daemon — Odoo JSON-RPC client
-requests>=2.31.0
-
-# YAML config
+# YAML config parsing
 pyyaml>=6.0

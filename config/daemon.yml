@@ -1,78 +1,46 @@
 # ============================================================
-# LIS Daemon — ASTM Configuration
-# ============================================================
-# This file defines how the daemon parses ASTM E1394 messages
-# and which ports to listen on. Adjust field positions if the
-# Mindray firmware uses non-standard ASTM field ordering.
+# LIS Daemon — HL7 Configuration
 # ============================================================
 
 daemon:
+  # TCP port the daemon listens on — both machines connect here
+  listen_port: 5001
+
   # How often to reload machine config from Odoo (seconds)
   machine_refresh_interval: 300
 
   # TCP connection settings
   tcp:
-    # Max time to wait for a complete ASTM frame (seconds)
-    receive_timeout: 30
-    # Buffer size for TCP reads (bytes)
-    buffer_size: 4096
+    receive_timeout: 60     # seconds to wait for next MLLP frame before closing
+    buffer_size: 65536      # bytes per TCP read
 
-  # Retry settings for Odoo JSON-RPC calls
+  # Odoo XML-RPC retry settings
   odoo_rpc:
     max_retries: 3
-    retry_delay: 2  # seconds between retries
-    timeout: 30     # HTTP request timeout (seconds)
+    retry_delay: 2          # seconds between retries
+    timeout: 30             # seconds per RPC call
 
 # ============================================================
-# ASTM E1394 Field Positions
+# HL7 v2.x Field Positions
 # ============================================================
-# ASTM records use pipe '|' as field delimiter.
-# Fields are 1-indexed as per the ASTM standard.
-# Adjust these ONLY if the Mindray firmware deviates from
-# standard field positions.
+# Standard HL7 positions — only change if Mindray firmware
+# deviates from the HL7 v2.3 standard.
 # ============================================================
 
-astm:
-  # Field delimiter
-  field_delimiter: "|"
+hl7:
+  field_separator: "|"
+  component_separator: "^"
+  repeat_separator: "~"
 
-  # Component delimiter (within fields)
-  component_delimiter: "^"
+  # OBR segment — where to find the sample barcode (LS###)
+  obr:
+    placer_order_field: 2   # OBR-2: Placer Order Number
+    filler_order_field: 3   # OBR-3: Filler Order Number (preferred)
 
-  # Repeat delimiter (for multiple test codes in O record)
-  repeat_delimiter: "\\"
-
-  # Record type indicators (first character after frame number)
-  record_types:
-    header: "H"
-    patient: "P"
-    order: "O"
-    result: "R"
-    terminator: "L"
-
-  # O (Order) record field positions
-  order_record:
-    # Field containing sample ID (LS###)
-    sample_id_field: 3      # O|1|LS130|...  → field 3
-    # Field containing test codes
-    test_codes_field: 5     # O|1|LS130||^^^GLU\^^^CREA → field 5
-
-  # R (Result) record field positions
-  result_record:
-    # Field containing the test code
-    test_code_field: 3      # R|1|^^^GLU → field 3 (code after ^^^)
-    # Field containing the result value
-    value_field: 4          # R|1|^^^GLU|5.2 → field 4
-    # Field containing the unit
-    unit_field: 5           # R|1|^^^GLU|5.2|mmol/L → field 5
-    # Field containing the reference range
-    ref_range_field: 6      # → field 6
-    # Field containing abnormal flags
-    flags_field: 7          # N/H/L/A → field 7
-
-  # P (Patient) record field positions (for logging only)
-  patient_record:
-    patient_id_field: 4     # P|1||HMS00621 → field 4
-    name_field: 5
-    dob_field: 7
-    sex_field: 8
+  # OBX segment — result fields
+  obx:
+    obs_id_field: 3         # OBX-3: Observation Identifier  e.g. "WBC^GB^"
+    value_field: 5          # OBX-5: Observation Value       e.g. "7.2"
+    units_field: 6          # OBX-6: Units                   e.g. "10*3/uL"
+    ref_range_field: 7      # OBX-7: Reference Range         e.g. "4.0-11.0"
+    abnormal_flag_field: 8  # OBX-8: Abnormal Flags          N / H / L / HH / LL
