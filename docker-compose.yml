@@ -6,12 +6,10 @@ services:
     env_file:
       - .env
     ports:
-      # Machine result ports — one per machine
-      # Add more as needed: '${LIS_PORT_N}:${LIS_PORT_N}'
-      - "${LIS_PORT_1:-5001}:${LIS_PORT_1:-5001}"
-      - "${LIS_PORT_2:-5002}:${LIS_PORT_2:-5002}"
+      - "0.0.0.0:5001:5001"   # BS-240Pro (biochemistry)
+      - "0.0.0.0:5002:5002"   # BC-780 (hematology)
+      - "0.0.0.0:5003:5003"   # CL-1200i (immunology)
     volumes:
-      # Mount config for live edits without rebuilding
       - ./config:/app/config:ro
     networks:
       - lis_net
@@ -23,7 +21,7 @@ services:
 
 networks:
   lis_net:
-    # Dev: DOCKER_NETWORK_EXTERNAL=false (creates a local bridge network)
-    # Prod: DOCKER_NETWORK_EXTERNAL=true, DOCKER_NETWORK=alwahab_network (joins Odoo's network)
+    # Dev:  DOCKER_NETWORK_EXTERNAL=false  (isolated bridge, daemon can't reach Odoo)
+    # Prod: DOCKER_NETWORK_EXTERNAL=true   (joins alwahab_network, reaches Odoo container)
     external: ${DOCKER_NETWORK_EXTERNAL:-false}
     name: ${DOCKER_NETWORK:-lis_network}
