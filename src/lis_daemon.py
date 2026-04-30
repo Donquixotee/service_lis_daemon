@@ -46,19 +46,19 @@ class LisDaemon:
         self.odoo_client.authenticate()
         await self._load_machines()
 
-        port = self.config.get("listen_port", 5001)
-        server = await asyncio.start_server(
-            self._handle_connection,
-            "0.0.0.0",
-            port,
-        )
-        self.servers.append(server)
+        ports = self.config.get("listen_ports", [5001, 5002, 5003])
+        for port in ports:
+            server = await asyncio.start_server(
+                self._handle_connection,
+                "0.0.0.0",
+                port,
+            )
+            self.servers.append(server)
+            logger.info("Listening on 0.0.0.0:%d", port)
+        
+        logger.info("%d machine(s) configured from Odoo", len(self.machines))
         self._running = True
 
-        logger.info(
-            "Listening on 0.0.0.0:%d — %d machine(s) configured",
-            port, len(self.machines),
-        )
         asyncio.create_task(self._refresh_loop())
 
     async def stop(self):

@@ -3,8 +3,11 @@
 # ============================================================
 
 daemon:
-  # TCP port the daemon listens on — both machines connect here
-  listen_port: 5001
+  # TCP ports the daemon listens on
+  listen_ports:
+    - 5001
+    - 5002
+    - 5003
 
   # How often to reload machine config from Odoo (seconds)
   machine_refresh_interval: 300
