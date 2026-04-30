@@ -42,7 +42,7 @@ class OdooClient:
             self.url, self.db, self.login,
         )
         try:
-            uid = self._common.authenticate(self.db, self.login, self.auth_password, {})
+            uid = self._common.authenticate(self.db, self.login, self.auth_password, {"interactive": False})
         except Exception as e:
             raise OdooRPCError("XML-RPC authentication failed: %s" % e)
 
