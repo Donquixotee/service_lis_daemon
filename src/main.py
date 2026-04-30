@@ -34,13 +34,26 @@ def load_config(config_path):
     return config
 
 
-def setup_logging(log_level):
+def setup_logging(log_level, log_file=None):
     """Configure structured logging."""
     level = getattr(logging, log_level.upper(), logging.INFO)
+    
+    handlers = [logging.StreamHandler()]
+    if log_file:
+        import os
+        from logging.handlers import RotatingFileHandler
+        log_dir = os.path.dirname(log_file)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        # Keep 5 backups of 10MB each
+        file_handler = RotatingFileHandler(log_file, maxBytes=10*1024*1024, backupCount=5)
+        handlers.append(file_handler)
+
     logging.basicConfig(
         level=level,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=handlers,
     )
     # Reduce noise from requests library
     logging.getLogger("urllib3").setLevel(logging.WARNING)
@@ -56,9 +69,10 @@ def main():
     odoo_password = os.environ.get("ODOO_PASSWORD", "")
     config_path = os.environ.get("LIS_CONFIG_PATH", "config/daemon.yml")
     log_level = os.environ.get("LIS_LOG_LEVEL", "INFO")
+    log_file = os.environ.get("LIS_LOG_FILE", "logs/lis_daemon.log")
 
     # --- Setup logging ---
-    setup_logging(log_level)
+    setup_logging(log_level, log_file)
 
     # --- Validate required env vars ---
     if not odoo_db:
