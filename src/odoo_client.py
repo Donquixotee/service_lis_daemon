@@ -123,6 +123,23 @@ class OdooClient:
             },
         )
 
+    def create_error_log(self, raw_message, error_message, machine_id=None, sample_barcode=None):
+        """Create a dnd.lis.result.log record with status='error'. Never raises."""
+        try:
+            vals = {
+                "status": "error",
+                "raw_message": raw_message or "",
+                "error_message": str(error_message),
+            }
+            if machine_id:
+                vals["machine_id"] = machine_id
+            if sample_barcode:
+                vals["sample_barcode"] = sample_barcode
+            log_id = self.call("dnd.lis.result.log", "create", args=[vals])
+            logger.info("Error log created: id=%s", log_id)
+        except Exception as e:
+            logger.error("Failed to create error log in Odoo: %s", e)
+
     def set_machine_status(self, machine_id, status, last_seen=None):
         """Update machine status in Odoo."""
         vals = {"status": status}

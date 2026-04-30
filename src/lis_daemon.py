@@ -238,6 +238,11 @@ class LisDaemon:
             parsed = self.parser.parse_message(raw_text)
         except Exception as e:
             logger.error("HL7 parse error (machine=%s): %s", machine_name, e, exc_info=True)
+            self.odoo_client.create_error_log(
+                raw_message=raw_text,
+                error_message=f"HL7 parse error: {e}",
+                machine_id=machine_id,
+            )
             return
 
         sample_barcode = parsed.get("sample_barcode", "")
@@ -246,6 +251,12 @@ class LisDaemon:
             logger.warning(
                 "No OBX results in message from %s (barcode=%s)",
                 machine_name, sample_barcode,
+            )
+            self.odoo_client.create_error_log(
+                raw_message=raw_text,
+                error_message="No OBX result segments found in HL7 message",
+                machine_id=machine_id,
+                sample_barcode=sample_barcode or None,
             )
             return
 
@@ -287,6 +298,12 @@ class LisDaemon:
                 logger.error(
                     "Failed to send result to Odoo (barcode=%s code=%s): %s",
                     barcode, test_code, e, exc_info=True,
+                )
+                self.odoo_client.create_error_log(
+                    raw_message=raw_text,
+                    error_message=f"RPC error for {test_code}: {e}",
+                    machine_id=machine_id,
+                    sample_barcode=barcode or None,
                 )
 
     # ------------------------------------------------------------------
