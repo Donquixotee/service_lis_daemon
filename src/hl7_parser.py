@@ -94,7 +94,7 @@ class HL7Parser:
                 fields = seg.split(self.field_sep)
                 placer = self._get(fields, self.obr_placer)
                 filler = self._get(fields, self.obr_filler)
-                current_barcode = filler or placer
+                current_barcode = placer or filler
                 if not parsed["sample_barcode"]:
                     parsed["sample_barcode"] = current_barcode
 
