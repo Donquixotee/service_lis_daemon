@@ -123,6 +123,27 @@ class OdooClient:
             },
         )
 
+    def save_images(self, log_id, images):
+        """Create dnd.lis.result.image records for a result log. Never raises."""
+        if not images or not log_id:
+            return
+        try:
+            for img in images:
+                self.call(
+                    "dnd.lis.result.image",
+                    "create",
+                    args=[{
+                        "log_id":    log_id,
+                        "sequence":  img.get("sequence", 10),
+                        "name":      img.get("name", "Image"),
+                        "obx_code":  img.get("obx_code", ""),
+                        "image_1920": img.get("data_b64", ""),
+                    }],
+                )
+            logger.info("Saved %d image(s) to log_id=%s", len(images), log_id)
+        except Exception as e:
+            logger.error("Failed to save images for log_id=%s: %s", log_id, e)
+
     def create_error_log(self, raw_message, error_message, machine_id=None, sample_barcode=None):
         """Create a dnd.lis.result.log record with status='error'. Never raises."""
         try:

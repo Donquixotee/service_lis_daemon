@@ -260,6 +260,9 @@ class LisDaemon:
             )
             return
 
+        images = parsed.get("images", [])
+        first_log_id = None
+
         for result in parsed["results"]:
             # Each OBX may carry its own barcode if multiple OBR blocks
             barcode    = result.get("sample_barcode") or sample_barcode
@@ -289,10 +292,13 @@ class LisDaemon:
                     ref_range      = ref_range  or None,
                     raw_message    = raw_text,
                 )
+                log_id = response.get("log_id")
+                if log_id and first_log_id is None:
+                    first_log_id = log_id
                 logger.info(
                     "Odoo  barcode=%s  code=%s  status=%s  log_id=%s",
                     barcode, test_code,
-                    response.get("status"), response.get("log_id"),
+                    response.get("status"), log_id,
                 )
             except Exception as e:
                 logger.error(
@@ -305,6 +311,11 @@ class LisDaemon:
                     machine_id=machine_id,
                     sample_barcode=barcode or None,
                 )
+
+        if images and first_log_id:
+            self.odoo_client.save_images(first_log_id, images)
+        elif images:
+            logger.warning("Got %d image(s) but no log_id to attach them to", len(images))
 
     # ------------------------------------------------------------------
     # Status helpers
